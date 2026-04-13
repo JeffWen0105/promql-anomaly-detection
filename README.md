@@ -65,6 +65,14 @@ Optionally, the `anomaly_type` label can be used to define more granular per-typ
 
 The `rules/examples` folder shows how recording rules can be used for selecting metrics to be used for anomaly detection.
 
+| Example file | Description |
+|---|---|
+| `rules/examples/node_exporter.yml` | Basic node_exporter CPU & memory |
+| `rules/examples/rhel89_node_exporter.yml` | **RHEL 8 / RHEL 9** — 12 system metrics (CPU, memory, swap, disk I/O, filesystem, network, load, context switches) using only default node_exporter collectors |
+| `rules/examples/otel_demo.yml` | OpenTelemetry demo application |
+
+See [`docs/sources/rhel89_node_exporter.md`](docs/sources/rhel89_node_exporter.md) for the full design rationale and literature references for the RHEL 8/9 example.
+
 Anomaly bands can be overlayed on top of your original time series panels in Grafana, allowing for easy visualization of the detected anomalies. An example dashboard can be found in the `demo/src/grafana/provisioning/dashboards/anomalies` folder.
 
 The framework is designed to be extended and adapted to different uses cases, while providing a solid foundation for anomaly detection in time series data.
