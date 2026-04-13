@@ -65,9 +65,9 @@ a single series the steal component is included automatically.
 Workload-dependent CPU baselines vary enormously between environments and
 even between time-of-day windows.  A fixed threshold of, say, 80 % would
 generate constant alerts on a batch-oriented host and miss a real incident
-on an idle host whose normal usage is 5 %.  The adaptive strategy's
-1 h average ± 2 σ (smoothed over 26 h) self-calibrates to each host's
-actual pattern.
+on an idle host whose normal usage is 5 %.  The adaptive strategy (see
+`adaptive.yml`: `anomaly:adaptive:avg_1h` ± `anomaly:adaptive:stddev_multiplier` × `anomaly:adaptive:stddev_st`,
+smoothed over 26 h) self-calibrates to each host's actual pattern.
 
 **Literature / specifications:**
 
