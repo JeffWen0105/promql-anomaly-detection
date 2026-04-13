@@ -1,44 +1,78 @@
 ################################################################################
 # RHEL 8 / RHEL 9 — AI Dynamic Anomaly Detection (node_exporter default collectors)
+# Job name: "Satelite"
 #
-# All metrics in this file are produced by node_exporter running with its
-# DEFAULT collectors only (no extra flags required).  Every recording rule
-# below tags a derived metric with the anomaly_name / anomaly_type /
-# anomaly_strategy labels so that it is automatically picked up by the
-# adaptive and robust strategy engines (adaptive.yml / robust.yml).
+# All metrics are produced by node_exporter running with DEFAULT collectors
+# only (no extra flags required).  Every recording rule attaches the labels
+# anomaly_name / anomaly_type / anomaly_strategy so that it is automatically
+# picked up by the adaptive and robust strategy engines (adaptive.yml /
+# robust.yml).
+#
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │  METRICS EXCLUDED FROM DYNAMIC ANOMALY DETECTION (with scientific       │
+# │  justification) — see docs/sources/rhel89_node_exporter.md §            │
+# │  "Metrics excluded and why"                                             │
+# │                                                                         │
+# │  1. Disk Read / Write raw throughput — ADAPTIVE only                    │
+# │     Heavy-tailed distribution (Leland et al. 1994; Arlitt & Williamson  │
+# │     1997; Gill et al. 2011).  Coefficient of variation (CV) regularly   │
+# │     exceeds 1, which means the adaptive strategy's σ-based bands will   │
+# │     be too wide to catch real anomalies or will fire constantly on       │
+# │     bursty I/O.  The robust strategy (MAD-based, outlier-resistant) IS  │
+# │     appropriate and is kept below.                                       │
+# │                                                                         │
+# │  2. Context Switch Rate — ADAPTIVE only                                 │
+# │     Exhibits high kurtosis and a heavy right tail (Dreizin et al. 2013; │
+# │     Lozi et al. 2016).  Mean + stddev-based bands are misleading for    │
+# │     non-Gaussian, high-skew data.  The robust strategy handles this     │
+# │     correctly via the median and MAD.                                   │
+# │                                                                         │
+# │  3. Network Error Rate — BOTH strategies                                │
+# │     A binary (zero / non-zero) signal.  In a healthy network, errors    │
+# │     are exactly 0; any sustained non-zero rate is a fault by IEEE       │
+# │     802.3 definition.  There is no statistical "normal band" to model.  │
+# │     This signal is handled below by a dedicated static threshold alert  │
+# │     (NetworkHardwareErrors) which fires when rate > 0 for 5 m.         │
+# │                                                                         │
+# │  4. load1 replaced by load5 (adaptive) and load15 (robust)             │
+# │     node_load1 is a 1-minute EMA; B. Gregg (2017) demonstrated it is   │
+# │     too noisy for baseline modelling.  load5 / load15 have lower        │
+# │     variance and better represent sustained saturation.                 │
+# └─────────────────────────────────────────────────────────────────────────┘
 #
 # Strategy selection:
-#   adaptive — mean + stddev with 26 h smoothing; best for metrics that
-#              follow a roughly normal, time-varying distribution (CPU,
-#              memory, network throughput).
-#   robust   — median + MAD; best for spiky / non-normal metrics and for
-#              detecting slow long-term drift (filesystem fill, swap growth,
-#              context-switch bursts).
+#   adaptive — mean + stddev, 26 h smoothing.  Requires roughly Gaussian,
+#              time-varying distribution with daily / weekly seasonality.
+#   robust   — median + MAD.  Suitable for spiky, heavy-tailed, or
+#              non-Gaussian metrics and for detecting slow long-term drift.
 #
 # See docs/sources/rhel89_node_exporter.md for the full design rationale
-# and literature references for each monitored target.
+# and literature references.
 ################################################################################
 
 groups:
 
   ##############################################################################
   # ADAPTIVE STRATEGY
+  # Only metrics with a clear seasonal pattern and near-Gaussian distribution
+  # are included here.  Volatile / heavy-tailed metrics are handled exclusively
+  # by the robust strategy below.
   ##############################################################################
 
   - name: AnomalyRHEL89NodeExporterAdaptive
     rules:
 
       # ── 1. CPU Utilisation (%) ──────────────────────────────────────────────
-      # Measures the percentage of wall-clock time all CPUs spend outside the
-      # idle state.  Captures user, system, iowait, irq, softirq, steal and
-      # nice collectively so a single series represents overall CPU pressure
-      # without needing per-mode breakdown.
+      # Aggregates all non-idle CPU modes (user, system, iowait, irq, softirq,
+      # steal, nice) into a single saturation percentage.  CPU utilisation
+      # follows a strong daily / weekly pattern, making the adaptive strategy
+      # (mean ± σ over a 26 h sliding window) highly effective.
       # Rationale: see docs/sources/rhel89_node_exporter.md § CPU
       - record: anomaly:resource:cpu_usage_percent
         expr: |-
           (
             1 - avg by (instance, job) (
-              rate(node_cpu_seconds_total{mode="idle", job=~"node_exporter"}[5m])
+              rate(node_cpu_seconds_total{mode="idle", job="Satelite"}[5m])
             )
           ) * 100
         labels:
@@ -47,17 +81,18 @@ groups:
           anomaly_strategy: "adaptive"
 
       # ── 2. Memory Utilisation (%) ───────────────────────────────────────────
-      # Uses MemAvailable (kernel-computed realistic free estimate) rather than
-      # MemFree so that reclaimable page-cache and slab memory are accounted
-      # for correctly, matching the semantics of `free -h` on RHEL 8/9.
+      # Uses MemAvailable (kernel-computed realistic free estimate, Linux 3.14+)
+      # rather than MemFree so reclaimable page-cache and slab are included.
+      # Memory utilisation grows slowly and predictably (gradual leaks, growing
+      # caches) — well-suited to adaptive baseline detection.
       # Rationale: see docs/sources/rhel89_node_exporter.md § Memory
       - record: anomaly:resource:memory_usage_percent
         expr: |-
           (
             1 - (
-              node_memory_MemAvailable_bytes{job=~"node_exporter"}
+              node_memory_MemAvailable_bytes{job="Satelite"}
               /
-              node_memory_MemTotal_bytes{job=~"node_exporter"}
+              node_memory_MemTotal_bytes{job="Satelite"}
             )
           ) * 100
         labels:
@@ -66,73 +101,39 @@ groups:
           anomaly_strategy: "adaptive"
 
       # ── 3. Swap Utilisation (%) ─────────────────────────────────────────────
-      # Only fires when swap is configured (SwapTotal > 0).  On RHEL 9 the
-      # default swap partition may be absent on cloud instances, so the `> 0`
-      # guard prevents spurious NaN series.
+      # Guards against RHEL 9 cloud instances where swap may be absent
+      # (SwapTotal = 0) to avoid a constant-NaN series.
+      # Swap usage is a slow, monotone signal; the adaptive strategy catches
+      # its steady creep toward saturation.
       # Rationale: see docs/sources/rhel89_node_exporter.md § Swap
       - record: anomaly:resource:swap_usage_percent
         expr: |-
           (
             1 - (
-              node_memory_SwapFree_bytes{job=~"node_exporter"}
+              node_memory_SwapFree_bytes{job="Satelite"}
               /
-              node_memory_SwapTotal_bytes{job=~"node_exporter"}
+              node_memory_SwapTotal_bytes{job="Satelite"}
             )
           ) * 100
           and on(instance, job)
-          (node_memory_SwapTotal_bytes{job=~"node_exporter"} > 0)
+          (node_memory_SwapTotal_bytes{job="Satelite"} > 0)
         labels:
           anomaly_name: "rhel_swap_usage"
           anomaly_type: "resource"
           anomaly_strategy: "adaptive"
 
-      # ── 4. Disk Read Throughput (bytes/s) ───────────────────────────────────
-      # Per physical or LVM device.  `loop` and optical (`sr`) devices are
-      # excluded; dm- (device-mapper / LVM) devices are included because
-      # RHEL 8/9 systems typically use LVM by default.
-      # Rationale: see docs/sources/rhel89_node_exporter.md § Disk I/O
-      - record: anomaly:resource:disk_read_bytes_rate
-        expr: |-
-          sum by (instance, job, device) (
-            rate(
-              node_disk_read_bytes_total{
-                job=~"node_exporter",
-                device!~"loop.*|sr[0-9]+"
-              }[5m]
-            )
-          )
-        labels:
-          anomaly_name: "rhel_disk_read"
-          anomaly_type: "resource"
-          anomaly_strategy: "adaptive"
-
-      # ── 5. Disk Write Throughput (bytes/s) ──────────────────────────────────
-      - record: anomaly:resource:disk_write_bytes_rate
-        expr: |-
-          sum by (instance, job, device) (
-            rate(
-              node_disk_written_bytes_total{
-                job=~"node_exporter",
-                device!~"loop.*|sr[0-9]+"
-              }[5m]
-            )
-          )
-        labels:
-          anomaly_name: "rhel_disk_write"
-          anomaly_type: "resource"
-          anomaly_strategy: "adaptive"
-
-      # ── 6. Disk I/O Utilisation (%) ─────────────────────────────────────────
-      # `io_time_seconds_total` tracks how many seconds the device was busy.
-      # Dividing by the scrape interval (rate over 5 m × 100) gives saturation
-      # in percent.  Values above 100 % are possible on multi-queue block
-      # devices but are still useful as anomaly signals.
+      # ── 4. Disk I/O Utilisation (%) ─────────────────────────────────────────
+      # io_time_seconds_total measures wall-clock time the device was busy,
+      # giving a normalised saturation ratio independent of transfer size.
+      # Unlike raw throughput (which is heavy-tailed), io_time is bounded
+      # 0–100 % on single-queue devices and exhibits a roughly Gaussian
+      # distribution around a workload-dependent mean — suitable for adaptive.
       # Rationale: see docs/sources/rhel89_node_exporter.md § Disk I/O
       - record: anomaly:resource:disk_io_utilisation_percent
         expr: |-
           rate(
             node_disk_io_time_seconds_total{
-              job=~"node_exporter",
+              job="Satelite",
               device!~"loop.*|sr[0-9]+"
             }[5m]
           ) * 100
@@ -141,22 +142,23 @@ groups:
           anomaly_type: "resource"
           anomaly_strategy: "adaptive"
 
-      # ── 7. Filesystem Usage (%) ─────────────────────────────────────────────
-      # Covers real persistent filesystems (ext4, xfs, btrfs, vfat).
-      # Excludes virtual / in-memory filesystems so that only actual storage
-      # capacity is tracked.  XFS is the default filesystem on RHEL 8/9.
+      # ── 5. Filesystem Usage (%) ─────────────────────────────────────────────
+      # Filtered to real persistent filesystems: ext4, XFS (RHEL 8/9 default),
+      # btrfs, vfat.  Virtual FSes (tmpfs, cgroup2, devtmpfs, …) are excluded.
+      # Filesystem fill is monotone and very low-variance — the ideal case for
+      # adaptive drift detection.
       # Rationale: see docs/sources/rhel89_node_exporter.md § Filesystem
       - record: anomaly:resource:filesystem_usage_percent
         expr: |-
           (
             1 - (
               node_filesystem_avail_bytes{
-                job=~"node_exporter",
+                job="Satelite",
                 fstype=~"ext[234]|xfs|btrfs|vfat"
               }
               /
               node_filesystem_size_bytes{
-                job=~"node_exporter",
+                job="Satelite",
                 fstype=~"ext[234]|xfs|btrfs|vfat"
               }
             )
@@ -166,15 +168,18 @@ groups:
           anomaly_type: "resource"
           anomaly_strategy: "adaptive"
 
-      # ── 8. Network Receive Throughput (bytes/s) ─────────────────────────────
-      # Physical / bond / VLAN interfaces only.  Loopback, veth pairs (containers),
-      # bridge interfaces and virtual NICs are excluded to avoid noise.
+      # ── 6. Network Receive Throughput (bytes/s) ─────────────────────────────
+      # Physical / bond / VLAN interfaces only.  Loopback, veth, bridge, and
+      # virtual NICs are excluded to focus on real host traffic.
+      # Network throughput follows strong business-hour seasonality, making
+      # the adaptive strategy highly effective at detecting DDoS, exfiltration,
+      # and link saturation anomalies.
       # Rationale: see docs/sources/rhel89_node_exporter.md § Network
       - record: anomaly:resource:network_receive_bytes_rate
         expr: |-
           rate(
             node_network_receive_bytes_total{
-              job=~"node_exporter",
+              job="Satelite",
               device!~"lo|veth.*|docker.*|br-.*|virbr.*|tun.*|dummy.*"
             }[5m]
           )
@@ -183,12 +188,12 @@ groups:
           anomaly_type: "resource"
           anomaly_strategy: "adaptive"
 
-      # ── 9. Network Transmit Throughput (bytes/s) ────────────────────────────
+      # ── 7. Network Transmit Throughput (bytes/s) ────────────────────────────
       - record: anomaly:resource:network_transmit_bytes_rate
         expr: |-
           rate(
             node_network_transmit_bytes_total{
-              job=~"node_exporter",
+              job="Satelite",
               device!~"lo|veth.*|docker.*|br-.*|virbr.*|tun.*|dummy.*"
             }[5m]
           )
@@ -197,72 +202,33 @@ groups:
           anomaly_type: "resource"
           anomaly_strategy: "adaptive"
 
-      # ── 10. Normalised System Load (load1 / #CPUs) ──────────────────────────
-      # Divides the 1-minute load average by the number of logical CPUs so
-      # that a value of 1.0 represents 100 % saturation regardless of host
-      # size.  Values > 1 indicate run-queue backlog.
+      # ── 8. Normalised System Load — load5 / #CPUs ───────────────────────────
+      # Uses node_load5 (5-minute EMA) rather than node_load1 (1-minute EMA).
+      # B. Gregg (2017) showed load1 is too noisy for baseline modelling:
+      # a single-second CPU spike can briefly double load1 with no real
+      # saturation.  load5 provides 5× more dampening while still detecting
+      # sustained saturation events within 10–15 min.
+      # Normalised by CPU count so that 1.0 = saturation on any host size.
       # Rationale: see docs/sources/rhel89_node_exporter.md § Load Average
-      - record: anomaly:resource:load1_per_cpu
+      - record: anomaly:resource:load5_per_cpu
         expr: |-
-          node_load1{job=~"node_exporter"}
+          node_load5{job="Satelite"}
           /
           count by (instance, job) (
-            node_cpu_seconds_total{job=~"node_exporter", mode="idle"}
+            node_cpu_seconds_total{job="Satelite", mode="idle"}
           )
         labels:
-          anomaly_name: "rhel_load1_per_cpu"
+          anomaly_name: "rhel_load5_per_cpu"
           anomaly_type: "resource"
-          anomaly_strategy: "adaptive"
-
-      # ── 11. Context Switch Rate (/s) ────────────────────────────────────────
-      # High context-switch rates indicate scheduler thrashing, excessive
-      # system calls, or lock contention — precursors to CPU soft-saturation.
-      # Rationale: see docs/sources/rhel89_node_exporter.md § Context Switches
-      - record: anomaly:resource:context_switches_rate
-        expr: |-
-          rate(node_context_switches_total{job=~"node_exporter"}[5m])
-        labels:
-          anomaly_name: "rhel_context_switches"
-          anomaly_type: "resource"
-          anomaly_strategy: "adaptive"
-
-      # ── 12. Network Error Rate (errors/s) ───────────────────────────────────
-      # Combines receive and transmit hardware errors.  Network errors rarely
-      # occur in healthy environments so a sustained non-zero rate indicates
-      # a NIC issue, cable fault, or switch misconfiguration.
-      # anomaly_type="errors" is used because the adaptive sparse-filter is
-      # not applied to this type, which is appropriate for a near-zero signal.
-      # Rationale: see docs/sources/rhel89_node_exporter.md § Network Errors
-      - record: anomaly:resource:network_errors_rate
-        expr: |-
-          sum by (instance, job, device) (
-            rate(
-              node_network_receive_errs_total{
-                job=~"node_exporter",
-                device!~"lo|veth.*|docker.*|br-.*|virbr.*|tun.*|dummy.*"
-              }[5m]
-            )
-            +
-            rate(
-              node_network_transmit_errs_total{
-                job=~"node_exporter",
-                device!~"lo|veth.*|docker.*|br-.*|virbr.*|tun.*|dummy.*"
-              }[5m]
-            )
-          )
-        labels:
-          anomaly_name: "rhel_network_errors"
-          anomaly_type: "errors"
           anomaly_strategy: "adaptive"
 
 
   ##############################################################################
   # ROBUST STRATEGY
-  # Mirrors the adaptive rules above using anomaly_strategy="robust".
-  # Use these when:
-  #   • The metric is spiky or non-normally distributed
-  #   • You care more about detecting slow long-term drift than sudden spikes
-  #   • You want outlier-resistant baselines (MAD-based)
+  # Uses median + MAD (outlier-resistant).  Appropriate for:
+  #   • Spiky / heavy-tailed metrics (disk throughput, context switches)
+  #   • Any metric where the mean is distorted by rare large values
+  #   • Slow long-term drift detection
   ##############################################################################
 
   - name: AnomalyRHEL89NodeExporterRobust
@@ -273,7 +239,7 @@ groups:
         expr: |-
           (
             1 - avg by (instance, job) (
-              rate(node_cpu_seconds_total{mode="idle", job=~"node_exporter"}[5m])
+              rate(node_cpu_seconds_total{mode="idle", job="Satelite"}[5m])
             )
           ) * 100
         labels:
@@ -286,9 +252,9 @@ groups:
         expr: |-
           (
             1 - (
-              node_memory_MemAvailable_bytes{job=~"node_exporter"}
+              node_memory_MemAvailable_bytes{job="Satelite"}
               /
-              node_memory_MemTotal_bytes{job=~"node_exporter"}
+              node_memory_MemTotal_bytes{job="Satelite"}
             )
           ) * 100
         labels:
@@ -301,25 +267,33 @@ groups:
         expr: |-
           (
             1 - (
-              node_memory_SwapFree_bytes{job=~"node_exporter"}
+              node_memory_SwapFree_bytes{job="Satelite"}
               /
-              node_memory_SwapTotal_bytes{job=~"node_exporter"}
+              node_memory_SwapTotal_bytes{job="Satelite"}
             )
           ) * 100
           and on(instance, job)
-          (node_memory_SwapTotal_bytes{job=~"node_exporter"} > 0)
+          (node_memory_SwapTotal_bytes{job="Satelite"} > 0)
         labels:
           anomaly_name: "rhel_swap_usage"
           anomaly_type: "resource"
           anomaly_strategy: "robust"
 
       # ── 4. Disk Read Throughput (bytes/s) ───────────────────────────────────
+      # ROBUST ONLY — excluded from adaptive because disk read I/O follows
+      # a heavy-tailed (Pareto-like) distribution with CV >> 1.
+      # Leland et al. (1994) showed self-similar, bursty traffic; Arlitt &
+      # Williamson (1997) confirmed this for server disk reads.  The MAD-based
+      # robust strategy is outlier-resistant and can model the median read rate
+      # without being distorted by burst peaks.
+      # Includes dm-* (LVM) devices; excludes loop*/sr* devices.
+      # Rationale: see docs/sources/rhel89_node_exporter.md § Disk I/O
       - record: anomaly:resource:disk_read_bytes_rate
         expr: |-
           sum by (instance, job, device) (
             rate(
               node_disk_read_bytes_total{
-                job=~"node_exporter",
+                job="Satelite",
                 device!~"loop.*|sr[0-9]+"
               }[5m]
             )
@@ -330,12 +304,16 @@ groups:
           anomaly_strategy: "robust"
 
       # ── 5. Disk Write Throughput (bytes/s) ──────────────────────────────────
+      # ROBUST ONLY — same heavy-tailed justification as reads.
+      # Write throughput anomalies also detect ransomware patterns:
+      # CISA AA22-321A documents characteristic write surges during encryption.
+      # Rationale: see docs/sources/rhel89_node_exporter.md § Disk I/O
       - record: anomaly:resource:disk_write_bytes_rate
         expr: |-
           sum by (instance, job, device) (
             rate(
               node_disk_written_bytes_total{
-                job=~"node_exporter",
+                job="Satelite",
                 device!~"loop.*|sr[0-9]+"
               }[5m]
             )
@@ -350,7 +328,7 @@ groups:
         expr: |-
           rate(
             node_disk_io_time_seconds_total{
-              job=~"node_exporter",
+              job="Satelite",
               device!~"loop.*|sr[0-9]+"
             }[5m]
           ) * 100
@@ -365,12 +343,12 @@ groups:
           (
             1 - (
               node_filesystem_avail_bytes{
-                job=~"node_exporter",
+                job="Satelite",
                 fstype=~"ext[234]|xfs|btrfs|vfat"
               }
               /
               node_filesystem_size_bytes{
-                job=~"node_exporter",
+                job="Satelite",
                 fstype=~"ext[234]|xfs|btrfs|vfat"
               }
             )
@@ -385,7 +363,7 @@ groups:
         expr: |-
           rate(
             node_network_receive_bytes_total{
-              job=~"node_exporter",
+              job="Satelite",
               device!~"lo|veth.*|docker.*|br-.*|virbr.*|tun.*|dummy.*"
             }[5m]
           )
@@ -399,7 +377,7 @@ groups:
         expr: |-
           rate(
             node_network_transmit_bytes_total{
-              job=~"node_exporter",
+              job="Satelite",
               device!~"lo|veth.*|docker.*|br-.*|virbr.*|tun.*|dummy.*"
             }[5m]
           )
@@ -408,47 +386,84 @@ groups:
           anomaly_type: "resource"
           anomaly_strategy: "robust"
 
-      # ── 10. Normalised System Load (load1 / #CPUs) ──────────────────────────
-      - record: anomaly:resource:load1_per_cpu
+      # ── 10. Normalised System Load — load15 / #CPUs ─────────────────────────
+      # Uses node_load15 (15-minute EMA) for the robust strategy because the
+      # longer averaging window aligns with the strategy's focus on sustained
+      # trends rather than short spikes.  load15 is the closest Linux analogue
+      # to a "trend indicator" (Gregg 2017) and is far less noisy than load1.
+      # Rationale: see docs/sources/rhel89_node_exporter.md § Load Average
+      - record: anomaly:resource:load15_per_cpu
         expr: |-
-          node_load1{job=~"node_exporter"}
+          node_load15{job="Satelite"}
           /
           count by (instance, job) (
-            node_cpu_seconds_total{job=~"node_exporter", mode="idle"}
+            node_cpu_seconds_total{job="Satelite", mode="idle"}
           )
         labels:
-          anomaly_name: "rhel_load1_per_cpu"
+          anomaly_name: "rhel_load15_per_cpu"
           anomaly_type: "resource"
           anomaly_strategy: "robust"
 
       # ── 11. Context Switch Rate (/s) ────────────────────────────────────────
+      # ROBUST ONLY — excluded from adaptive because context switches exhibit
+      # high kurtosis and a heavy right tail (Dreizin et al. 2013; Lozi et al.
+      # 2016).  Mean + stddev bands are invalid for such skewed distributions.
+      # The MAD-based robust strategy is insensitive to occasional enormous
+      # bursts and builds a stable baseline around the typical (median) rate.
+      # Rationale: see docs/sources/rhel89_node_exporter.md § Context Switches
       - record: anomaly:resource:context_switches_rate
         expr: |-
-          rate(node_context_switches_total{job=~"node_exporter"}[5m])
+          rate(node_context_switches_total{job="Satelite"}[5m])
         labels:
           anomaly_name: "rhel_context_switches"
           anomaly_type: "resource"
           anomaly_strategy: "robust"
 
-      # ── 12. Network Error Rate (errors/s) ───────────────────────────────────
-      - record: anomaly:resource:network_errors_rate
+
+  ##############################################################################
+  # STATIC THRESHOLD ALERTS
+  # Metrics that are binary signals (0 = healthy, non-zero = fault) are NOT
+  # suitable for statistical anomaly detection because there is no meaningful
+  # "normal band" to model.  They are handled here as simple threshold alerts.
+  ##############################################################################
+
+  - name: AnomalyRHEL89NodeExporterStaticAlerts
+    rules:
+
+      # Network Hardware Errors
+      # IEEE 802.3 defines FCS errors and alignment errors as layer-2 fault
+      # conditions.  Any sustained non-zero rate indicates a physical layer
+      # fault (cable, transceiver, switch port) or NIC driver issue.
+      # A dynamic anomaly detection baseline cannot be built for a normally-zero
+      # signal; a static threshold of > 0 for 5 m is the correct detection
+      # method.
+      # Ref: IEEE 802.3-2022 §30.3.1 (oIfInErrors, oIfOutErrors);
+      #      NIST SP 800-61 Rev. 2 §3.2 (indicators of network incidents).
+      - alert: NetworkHardwareErrors
+        for: 5m
         expr: |-
           sum by (instance, job, device) (
             rate(
               node_network_receive_errs_total{
-                job=~"node_exporter",
+                job="Satelite",
                 device!~"lo|veth.*|docker.*|br-.*|virbr.*|tun.*|dummy.*"
               }[5m]
             )
             +
             rate(
               node_network_transmit_errs_total{
-                job=~"node_exporter",
+                job="Satelite",
                 device!~"lo|veth.*|docker.*|br-.*|virbr.*|tun.*|dummy.*"
               }[5m]
             )
-          )
+          ) > 0
         labels:
-          anomaly_name: "rhel_network_errors"
-          anomaly_type: "errors"
-          anomaly_strategy: "robust"
+          severity: warning
+        annotations:
+          summary: "Network hardware errors on {{ $labels.instance }} ({{ $labels.device }})"
+          description: >
+            Interface {{ $labels.device }} on {{ $labels.instance }} is
+            recording hardware-level receive or transmit errors.  This
+            indicates a physical layer fault (cable, SFP, switch port) or
+            NIC firmware issue.  Check `ethtool -S <dev>` for detailed
+            counters.
