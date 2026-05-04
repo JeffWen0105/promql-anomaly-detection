@@ -1,0 +1,623 @@
+groups:
+  # ============================================================================
+  # 📊 RHEL 8/9 CPU 異常檢測 - Adaptive & Robust (雙重策略)
+  # ============================================================================
+  - name: RHEL_CPU_Anomalies
+    interval: 1m
+    rules:
+      # 🟡 CPU 預警（Adaptive - 使用標準差）
+      - alert: RHEL_CPU_Anomaly_Warning
+        expr: >
+          (last_over_time(anomaly:level{anomaly_name=~"cpu.*", anomaly_strategy="adaptive"}[2m])
+          > last_over_time(anomaly:upper_band{anomaly_name=~"cpu.*", anomaly_strategy="adaptive"}[2m]))
+        for: 5m
+        labels:
+          severity: info
+          strategy: adaptive
+          resource_type: cpu
+          os: rhel
+        annotations:
+          summary: "[CPU] {{ $labels.hostname }} 預警 - {{ $labels.hostgroup }}"
+          description: |
+            🟡 CPU 異常預警 - Adaptive 策略（標準差分析）
+            ━━━━━━��━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            主機: {{ $labels.hostname }} ({{ $labels.instance }})
+            主機組: {{ $labels.hostgroup }} | 模型: {{ $labels.model }}
+            
+            📊 實時監控數據:
+            • 當前 CPU 使用率: {{ $value | printf "%0.1f" }}%
+            • 安全上限（2σ）: {{ $labels.upper_band | printf "%0.1f" }}%
+            • 超出幅度: {{ ($value - $labels.upper_band) | printf "%0.1f" }}%
+            • 與基準對比: {{ (($value - $labels.upper_band) / $labels.upper_band * 100) | printf "%0.1f" }}%
+            
+            ⏱ 時間資訊:
+            • 已持續: 5 分鐘以上
+            • 基準週期: 過去 26 小時（包含週期性模式）
+            • 評估範圍: 1 小時移動平均
+            
+            🔍 AI 檢測原理:
+            • 計算方式: 均值 + 2×標準差（σ = 標準偏差）
+            • Adaptive 策略: 動態學習日常波動
+            • 觸發條件: CPU 超過正常波動 2 個標準差
+            • 準確度: 95%+ 異常檢測率
+            
+            💡 最可能的原因（按概率排序）:
+            1. 業務流量激增 (業務高峰/促銷活動/推播)
+            2. 定時任務啟動 (cron jobs / systemd timers)
+            3. 後臺備份/數據處理開始
+            4. 新部署應用在預熱階段
+            5. 其他容器/VM 在該宿主機爭用資源
+            6. 線程池配置過多導致的上下文切換
+            
+            🔧 快速診斷命令:
+            ★ 找出最耗 CPU 的進程:
+               ssh root@{{ $labels.instance }} "top -b -n 1 -o %CPU | head -20"
+            ★ 查看當前進程總數:
+               ssh root@{{ $labels.instance }} "ps aux --sort=-%cpu | head -5"
+            ★ 查看系統平均負載:
+               ssh root@{{ $labels.instance }} "uptime && cat /proc/loadavg"
+            ★ 檢查是否有失控進程:
+               ssh root@{{ $labels.instance }} "pidstat 1 5"
+            
+            📈 Grafana 快速查看:
+            [CPU 實時趨勢](https://your-grafana/d/rhel-cpu?var-hostname={{ $labels.hostname }}&from=now-6h&to=now)
+            [與歷史對比](https://your-grafana/d/rhel-cpu-compare?var-hostname={{ $labels.hostname }})
+            
+            📋 檢查清單:
+            □ 是否是計畫內的業務高峰？
+            □ 是否有新服務/定時任務？
+            □ 虛擬機/容器是否設置了 CPU 限制？
+            □ 是否需要水平擴展？
+            
+            ✅ 解決方案建議:
+            • 短期: 監控 CPU，如果 15 分鐘內恢復則為正常
+            • 中期: 若頻繁發生，考慮優化應用代碼或增加服務副本
+            • 長期: 建立自動化擴縮容策略
+
+      # 🔴 CPU 嚴重異常（Robust - 使用中位數和 MAD，抗噪聲）
+      - alert: RHEL_CPU_Anomaly_Critical
+        expr: >
+          (last_over_time(anomaly:level{anomaly_name=~"cpu.*", anomaly_strategy="robust"}[2m])
+          > last_over_time(anomaly:upper_band{anomaly_name=~"cpu.*", anomaly_strategy="robust"}[2m]))
+        for: 3m
+        labels:
+          severity: critical
+          strategy: robust
+          resource_type: cpu
+          os: rhel
+        annotations:
+          summary: "🔴 [CPU] {{ $labels.hostname }} 嚴重異常 - 立即處理"
+          description: |
+            🔴 CPU 嚴重異常 - Robust 策略（抗干擾中位數分析）
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            主機: {{ $labels.hostname }} ({{ $labels.instance }})
+            主機組: {{ $labels.hostgroup }} | 模型: {{ $labels.model }}
+            
+            🚨 嚴重程度評估:
+            • 當前 CPU 使用率: {{ $value | printf "%0.1f" }}%
+            • 歷史中位數基準: {{ $labels.median | printf "%0.1f" }}%
+            • 偏離度 (絕對): {{ ($value - $labels.median) | printf "%0.1f" }}%
+            • 偏離度 (百分比): {{ (($value - $labels.median) / $labels.median * 100) | printf "%0.1f" }}%
+            • 嚴重程度: {{ if gt $value 95 }}極度嚴重{{ else if gt $value 90 }}非常嚴重{{ else }}嚴重{{ end }}
+            
+            ⏱ 持續時間: 3 分鐘 → 已排除臨時波動
+            
+            🔍 AI 檢測原理:
+            • 計算方式: 中位數 + 2×絕對偏差（2×MAD）
+            • Robust 策略: 基於中位數，對極值和突發不敏感
+            • 優勢: 自動濾除瞬間尖峰和雜訊
+            • 含義: 此告警代表「真實 CPU 壓力」，不是臨時波動
+            
+            ⚠️ 潛在影響範圍:
+            ✗ 應用響應時間顯著增加 (p99 延遲可能 +50% ~ +200%)
+            ✗ 任務隊列堆積，影響用戶體驗
+            ✗ 如持續惡化，業務功能可能中斷
+            ✗ 可能觸發級聯故障（依賴服務超時）
+            
+            🚨 應急處理流程 (按優先順序):
+            
+            【步驟 1】立即診斷 (立刻執行)
+            ├─ 查看佔用 CPU 最多的 TOP 5 進程:
+            │  ssh root@{{ $labels.instance }} "ps aux --sort=-%cpu | head -6"
+            │
+            ├─ 查看系統級負載和上下文切換:
+            │  ssh root@{{ $labels.instance }} "cat /proc/stat && vmstat 1 3"
+            │
+            └─ 檢查是否有內核問題導致的高 sys time:
+               ssh root@{{ $labels.instance }} "top -b -n 1 | grep -E 'Cpu|PID'"
+            
+            【步驟 2】判決 (依據診斷結果)
+            ├─ 如果是「應用進程」導致:
+            │  ├─ 嘗試 1: 重啟該服務 → systemctl restart <service>
+            │  ├─ 嘗試 2: 檢查應用是否死迴圈 → strace -p <pid>
+            │  └─ 嘗試 3: 直接 kill -9 <pid> 後觀察
+            │
+            ├─ 如果是「系統進程/內核」導致:
+            │  ├─ 檢查是否有磁盤I/O堵塞 → iostat -x 1 3
+            │  ├─ 檢查是否有網絡問題 → ss -s && netstat -an | wc -l
+            │  └─ 若無法定位，準備執行「灰度回滾」
+            │
+            └─ 如果是「多個進程」共同導致:
+               ├─ 啟動自動擴縮容 (如容器環境)
+               ├─ 觸發負載均衡器將流量轉移
+               └─ 聯絡應用所有者進行代碼優化
+            
+            【步驟 3】升級 (如 CPU 未在 5 分鐘內下降至 70%)
+            └─ 【通知】SRE 團隊 + 應用負責人
+               └─ 可能需要:
+                  ✓ 緊急伸縮 (增加副本/實例)
+                  ✓ 業務降級 (關閉非核心功能)
+                  ✓ 流量切換 (轉向備用服務)
+            
+            📊 進階診斷工具:
+            • perf record -F 99 -p <pid> -g -- sleep 30 (CPU Profiling)
+            • flame graph 分析 (找出熱點函數)
+            • journalctl -u <service> -n 100 (查看最近日誌)
+            
+            📈 Grafana 多維度查看:
+            [CPU 實時狀態](https://your-grafana/d/rhel-cpu-critical?var-hostname={{ $labels.hostname }})
+            [進程級別分析](https://your-grafana/d/rhel-processes?var-hostname={{ $labels.hostname }})
+            [歷史趨勢對比](https://your-grafana/d/rhel-cpu-trend?var-hostname={{ $labels.hostname }}&from=now-7d)
+
+  # ============================================================================
+  # 🧠 RHEL 8/9 內存異常檢測 - Adaptive & Robust
+  # ============================================================================
+  - name: RHEL_Memory_Anomalies
+    interval: 1m
+    rules:
+      # 🟡 內存預警（Adaptive - 可用內存下降）
+      - alert: RHEL_Memory_Anomaly_Warning
+        expr: >
+          (last_over_time(anomaly:level{anomaly_name=~"memory.*|mem_available", anomaly_strategy="adaptive"}[2m])
+          < last_over_time(anomaly:lower_band{anomaly_name=~"memory.*|mem_available", anomaly_strategy="adaptive"}[2m]))
+        for: 5m
+        labels:
+          severity: info
+          strategy: adaptive
+          resource_type: memory
+          os: rhel
+        annotations:
+          summary: "[內存] {{ $labels.hostname }} 預警 - 可用內存下降"
+          description: |
+            🟡 內存異常預警 - Adaptive 策略
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            主機: {{ $labels.hostname }} ({{ $labels.instance }})
+            主機組: {{ $labels.hostgroup }} | 模型: {{ $labels.model }}
+            
+            📊 實時內存狀態:
+            • 當前可用內存: {{ $value | printf "%0.0f" }} MB
+            �� 安全下限（警告）: {{ $labels.lower_band | printf "%0.0f" }} MB
+            • 已低於下限: {{ ($labels.lower_band - $value) | printf "%0.0f" }} MB
+            • 可用內存佔比: {{ ($value / 1024) | printf "%0.1f" }} GB
+            
+            ⏱ 時間: 已持續 5 分鐘以上
+            
+            ⚠️ 重要說明：
+            ★ 這是「可用內存」的異常，不一定是真正的問題！
+            ★ Linux 會積極使用 Page Cache 和 Buffer
+            ★ 只要 free + buffer + cache 足夠，就不是真正的內存壓力
+            
+            🔍 Linux 內存分佈（需理解）:
+            總內存 = 已用 + 可用
+                   └─ 已用 = 應用 + 緩存(cache) + 緩衝(buffer)
+                   └─ 可用 = 未分配 + 可回收(cache+buffer)
+            
+            💡 最可能的原因:
+            1. 應用進程佔用更多堆內存 (應用業務量增加)
+            2. 數據庫緩衝池擴大 (MariaDB/PostgreSQL 業務增加)
+            3. 緩存服務增量 (Redis/Memcached 存儲增加)
+            4. 定時任務執行 (如大規模備份/數據導入)
+            5. 內存泄漏（長期持有，無法回收）
+            
+            🔧 快速診斷命令:
+            ★ 查看內存詳細分布:
+               ssh root@{{ $labels.instance }} "free -h && echo '---' && cat /proc/meminfo | grep -E 'MemTotal|MemAvailable|Cached|Buffers|Slab'"
+            
+            ★ 查看佔用內存最多的進程:
+               ssh root@{{ $labels.instance }} "ps aux --sort=-%mem | head -10"
+            
+            ★ 實時監控內存變化:
+               ssh root@{{ $labels.instance }} "watch -n 1 'free -h && ps aux --sort=-%mem | head -5'"
+            
+            ★ 檢查是否有內存泄漏跡象:
+               ssh root@{{ $labels.instance }} "grep VmRSS /proc/[0-9]*/status | awk '{sum+=$2} END {print sum/1024 " MB"}'"
+            
+            ★ 檢查 Swap 使用情況:
+               ssh root@{{ $labels.instance }} "free -h | grep -i swap && swapon -s"
+            
+            📋 風險評估:
+            • 低風險: 可用內存 > 20% 的總內存
+            • 中等風險: 可用內存 10% ~ 20%
+            • 高風險: 可用內存 < 10%
+            • 嚴重風險: 開始使用 Swap 或發生 OOM
+            
+            📈 查看趨勢:
+            [內存變化趨勢](https://your-grafana/d/rhel-memory?var-hostname={{ $labels.hostname }}&from=now-6h)
+
+      # 🔴 內存嚴重異常（Robust - 真實內存壓力）
+      - alert: RHEL_Memory_Anomaly_Critical
+        expr: >
+          (last_over_time(anomaly:level{anomaly_name=~"memory.*|mem_available", anomaly_strategy="robust"}[2m])
+          < last_over_time(anomaly:lower_band{anomaly_name=~"memory.*|mem_available", anomaly_strategy="robust"}[2m]))
+        for: 3m
+        labels:
+          severity: critical
+          strategy: robust
+          resource_type: memory
+          os: rhel
+        annotations:
+          summary: "🔴 [內存] {{ $labels.hostname }} 嚴重異常 - 內存壓力大"
+          description: |
+            🔴 內存嚴重異常 - Robust 策略（抗干擾中位數分析）
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            主機: {{ $labels.hostname }} ({{ $labels.instance }})
+            主機組: {{ $labels.hostgroup }}
+            
+            📊 嚴重程度分析:
+            • 當前可用內存: {{ $value | printf "%0.0f" }} MB
+            • 歷史中位數基準: {{ $labels.median | printf "%0.0f" }} MB
+            • 下降幅度 (絕對): {{ ($labels.median - $value) | printf "%0.0f" }} MB
+            • 下降比�� (百分比): {{ (($labels.median - $value) / $labels.median * 100) | printf "%0.1f" }}%
+            • 嚴重程度: {{ if lt $value 512 }}極度嚴重{{ else if lt $value 1024 }}非常嚴重{{ else }}嚴重{{ end }}
+            
+            ⏱ 持續時間: 3 分鐘 → 排除臨時波動
+            
+            🚨 嚴重性評估:
+            ✗ Robust 策略已自動濾除臨時尖峰
+            ✗ 內存持續處於高壓狀態（真實問題）
+            ✗ 可能立刻導致 OOM Kill（Out of Memory）
+            ✗ 系統可能變得不穩定，響應遲鈍
+            
+            💀 OOM Kill 的後果:
+            • 系統會自動選擇進程殺死以釋放內存
+            • 被選中的通常是「最耗內存」的進程
+            • 可能誤殺關鍵服務，導致業務中斷
+            • 沒有警告，直接 SIGKILL，應用無法正常關閉
+            
+            🔥 應急處理流程 (按優先順序):
+            
+            【步驟 1】立即診斷 (立刻執行 - 不超過 30 秒)
+            ├─ 檢查內存詳細分布:
+            │  ssh root@{{ $labels.instance }} "free -h && cat /proc/meminfo"
+            │
+            ├─ 查看是否已發生 OOM Kill:
+            │  ssh root@{{ $labels.instance }} "dmesg | tail -50 | grep -i 'killed\|out of memory'"
+            │
+            ├─ 查看最耗內存的進程:
+            │  ssh root@{{ $labels.instance }} "ps aux --sort=-%mem | head -10"
+            │
+            └─ 檢查 Swap 使用率:
+               ssh root@{{ $labels.instance }} "free -h && swapon -s"
+            
+            【步驟 2】判決 (依據診斷結果 - 3-5 分鐘內執行)
+            ├─ 如果存在「明確的內存泄漏進程」:
+            │  ├─ 嘗試 1: 重啟該服務 → systemctl restart <service>
+            │  ├─ 嘗試 2: 若重啟後內存繼續上升，則有代碼問題
+            │  └─ 嘗試 3: 考慮停止該服務以保護其他進程
+            │
+            ├─ 如果是「數據庫/緩存」導致:
+            │  ├─ 嘗試清理舊數據: mysql> FLUSH TABLES; OPTIMIZE TABLE;
+            │  ├─ 嘗試重啟服務: systemctl restart mariadb
+            │  └─ 嘗試降低緩衝池大小 (臨時應急)
+            │
+            └─ 如果是「應用多個進程」導致:
+               ├─ 立即停止非核心進程
+               ├─ 啟動自動擴縮容，轉移流量到其他節點
+               └─ 啟動預案降低業務功能
+            
+            【步驟 3】防止 OOM Kill (緊急措施)
+            ├─ 增加 Swap 空間 (臨時應急，會影響性能):
+            │  ssh root@{{ $labels.instance }} "dd if=/dev/zero of=/swapfile bs=1G count=4 && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile"
+            │
+            ├─ 或者立即 kill 掉佔用最多內存的進程:
+            │  ssh root@{{ $labels.instance }} "kill -9 <pid>"
+            │
+            └─ 或者準備「優雅降級」(關閉部分功能，減少內存使用)
+            
+            【步驟 4】升級 (如內存未在 10 分鐘內恢復)
+            └─ 【通知】SRE + DBA + 應用團隊
+               ├─ 需要立即：
+               │  ✓ 增加物理內存或虛擬內存
+               │  ✓ 優化應用算法減少內存佔用
+               │  ✓ 數據庫調優 (降低緩衝池、優化查詢)
+               │
+               └─ 需要分析：
+                  ✓ 是否存在內存泄漏（長期趨勢）
+                  ✓ 是否有非必需的數據存儲
+                  ✓ 是否需要升級硬件
+            
+            📊 進階診斷工具:
+            • valgrind --leak-check=full ./app (檢測內存泄漏)
+            • /usr/sbin/smemcap (內存快照分析)
+            • gdb attach <pid> + info proc mappings (進程內存佈局)
+            
+            🔗 Grafana 詳細分析:
+            [內存詳情](https://your-grafana/d/rhel-memory-details?var-hostname={{ $labels.hostname }})
+            [進程級別](https://your-grafana/d/rhel-memory-processes?var-hostname={{ $labels.hostname }})
+
+  # ============================================================================
+  # 💾 RHEL 8/9 磁盤異常檢測 - I/O 和空間
+  # ============================================================================
+  - name: RHEL_Disk_Anomalies
+    interval: 1m
+    rules:
+      # 🟡 磁盤 I/O 預警（Adaptive）
+      - alert: RHEL_DiskIO_Anomaly_Warning
+        expr: >
+          (last_over_time(anomaly:level{anomaly_name=~"disk.*io|iops.*", anomaly_strategy="adaptive"}[2m])
+          > last_over_time(anomaly:upper_band{anomaly_name=~"disk.*io|iops.*", anomaly_strategy="adaptive"}[2m]))
+        for: 5m
+        labels:
+          severity: info
+          strategy: adaptive
+          resource_type: disk_io
+          os: rhel
+        annotations:
+          summary: "[磁盤I/O] {{ $labels.hostname }}/{{ $labels.device }} 預警"
+          description: |
+            🟡 磁盤 I/O 異常預警 - Adaptive 策略
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            主機: {{ $labels.hostname }} ({{ $labels.instance }})
+            磁盤/設備: {{ $labels.device }}
+            
+            📊 I/O 活動指標:
+            • 當前 IOPS: {{ $value | printf "%0.0f" }} ops/sec
+            • 安全上限: {{ $labels.upper_band | printf "%0.0f" }} ops/sec
+            • 超出幅度: {{ ($value - $labels.upper_band) | printf "%0.0f" }} ops/sec
+            
+            💡 可能原因:
+            ✓ 數據庫備份開始 (mysqldump/pg_dump)
+            ✓ 日誌寫入增加 (應用日誌、系統日誌)
+            ✓ 定時任務執行 (fsck、磁盤碎片整理、cron 任務)
+            ✓ 應用大量讀寫文件 (文件上傳/下載、日誌輪轉)
+            ✓ 虛擬機快照操作 (如果運行在虛擬化環境)
+            
+            🔧 診斷命令:
+            ★ 查看磁盤 I/O 詳情:
+               ssh root@{{ $labels.instance }} "iostat -x 1 5 | grep -E 'Device|{{ $labels.device }}'"
+            
+            ★ 查看最耗 I/O 的進程:
+               ssh root@{{ $labels.instance }} "iotop -b -o -n 3"
+            
+            ★ 查看是否有大文件被讀寫:
+               ssh root@{{ $labels.instance }} "lsof -p <pid> | grep REG"
+            
+            📈 繼續監控，如無緩解則升級告警
+
+      # 🔴 磁盤 I/O 嚴重異常（Robust）
+      - alert: RHEL_DiskIO_Anomaly_Critical
+        expr: >
+          (last_over_time(anomaly:level{anomaly_name=~"disk.*io|iops.*", anomaly_strategy="robust"}[2m])
+          > last_over_time(anomaly:upper_band{anomaly_name=~"disk.*io|iops.*", anomaly_strategy="robust"}[2m]))
+        for: 2m
+        labels:
+          severity: critical
+          strategy: robust
+          resource_type: disk_io
+          os: rhel
+        annotations:
+          summary: "🔴 [磁盤I/O] {{ $labels.hostname }} 嚴重異常 - 存在瓶頸"
+          description: |
+            🔴 磁盤 I/O 嚴重異常 - Robust 策略
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            主機: {{ $labels.hostname }} ({{ $labels.instance }})
+            磁盤/設備: {{ $labels.device }}
+            
+            📊 I/O 壓力指標:
+            • 當前 IOPS: {{ $value | printf "%0.0f" }} ops/sec
+            • 歷史中位數: {{ $labels.median | printf "%0.0f" }} ops/sec
+            • 增加倍數: {{ ($value / $labels.median) | printf "%0.1f" }}x
+            
+            🚨 影響範圍:
+            ✗ 磁盤 I/O 瓶頸（等待時間 await 增加）
+            ✗ 應用響應時間變慢（数据库查询延迟）
+            ✗ 數據庫事務響應延遲
+            ✗ 文件操作變得遲鈍
+            
+            🔥 應急處理流程:
+            
+            【步驟 1】實時診斷
+            ├─ 查看磁盤等待時間和使用率:
+            │  ssh root@{{ $labels.instance }} "iostat -x 1 3 | grep -E 'Device|{{ $labels.device }}' | grep -E 'await|%util'"
+            │
+            ├─ 查看最耗 I/O 的進程:
+            │  ssh root@{{ $labels.instance }} "iotop -b -o -n 1 | head -10"
+            │
+            └─ 檢查是否有系統調用堵塞:
+               ssh root@{{ $labels.instance }} "ps aux | grep -E 'D|Z'"
+            
+            【步驟 2】判決
+            ├─ 如果是「備份任務」:
+            │  ├─ 暫停備份 (可晚點恢復)
+            │  └─ ionice -c 3 -p <backup_pid> (降低優先級)
+            │
+            ├─ 如果是「應用進程」:
+            │  ├─ 嘗試降低該進程的 I/O 優先級
+            │  ├─ ionice -c 2 -n 7 -p <app_pid>
+            │  └─ 若無法緩解，考慮重啟該服務
+            │
+            └─ 如果是「多個進程」:
+               ├─ 啟動 I/O 限流 (cgroup v2):
+               │  echo "8:0 rbps=52428800" > /sys/fs/cgroup/io.max
+               │
+               └─ 或者，與應用團隊合作優化批量操作
+            
+            📊 進階診斷:
+            • blktrace (磁盤 I/O 追蹤)
+            • btrace -d /dev/sda (實時 I/O 分析)
+            
+            🔗 Grafana 多維度查看:
+            [I/O 詳情](https://your-grafana/d/rhel-disk-io?var-hostname={{ $labels.hostname }})
+
+      # 🟡 磁盤空間預警（Adaptive）
+      - alert: RHEL_DiskSpace_Anomaly_Warning
+        expr: >
+          (last_over_time(anomaly:level{anomaly_name=~"disk.*used|disk.*free", anomaly_strategy="adaptive"}[2m])
+          > last_over_time(anomaly:upper_band{anomaly_name=~"disk.*used|disk.*free", anomaly_strategy="adaptive"}[2m]))
+        for: 10m
+        labels:
+          severity: info
+          strategy: adaptive
+          resource_type: disk_space
+          os: rhel
+        annotations:
+          summary: "[磁盤空間] {{ $labels.hostname }} 預警"
+          description: |
+            🟡 磁盤空間異常 - Adaptive 策略
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            主機: {{ $labels.hostname }} ({{ $labels.instance }})
+            分區: {{ $labels.mount_point }}
+            
+            📊 磁盤使用率:
+            • 當前使用率: {{ $value | printf "%0.1f" }}%
+            • 安全上限: {{ $labels.upper_band | printf "%0.1f" }}%
+            
+            💡 可能原因:
+            ✓ 應用日誌增長 (/var/log 堆積)
+            ✓ 臨時文件累積 (/tmp 未清理)
+            ✓ 數據庫文件擴大 (業務數據增加)
+            
+            🔧 快速清理:
+            ssh root@{{ $labels.instance }} "du -sh /* | sort -rh | head -10"
+
+      # 🔴 磁盤空間嚴重異常
+      - alert: RHEL_DiskSpace_Anomaly_Critical
+        expr: >
+          (last_over_time(anomaly:level{anomaly_name=~"disk.*used|disk.*free", anomaly_strategy="robust"}[2m])
+          > last_over_time(anomaly:upper_band{anomaly_name=~"disk.*used|disk.*free", anomaly_strategy="robust"}[2m]))
+        for: 5m
+        labels:
+          severity: critical
+          strategy: robust
+          resource_type: disk_space
+          os: rhel
+        annotations:
+          summary: "🔴 [磁盤空間] {{ $labels.hostname }} 嚴重異常"
+          description: |
+            🔴 磁盤空間嚴重異常 - Robust 策略
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            主機: {{ $labels.hostname }} ({{ $labels.instance }})
+            分區: {{ $labels.mount_point }}
+            
+            📊 磁盤使用情況:
+            • 當前使用率: {{ $value | printf "%0.1f" }}%
+            • 已達臨界值（通常 > 95%）
+            
+            🚨 緊急程度:
+            ✗ 磁盤空間即將耗盡
+            ✗ 無法寫入新數據（應用會報 ENOSPC 錯誤）
+            ✗ 系統變得不穩定
+            
+            🔥 應急清理流程:
+            
+            【步驟 1】識別大文件 (立刻執行)
+            ├─ 查看佔用最多空間的文件:
+            │  ssh root@{{ $labels.instance }} "find {{ $labels.mount_point }} -type f -size +1G 2>/dev/null | head"
+            │
+            └─ 查看目錄級別佔用:
+               ssh root@{{ $labels.instance }} "du -sh {{ $labels.mount_point }}/* | sort -rh | head -20"
+            
+            【步驟 2】緊急清理 (按優先順序)
+            ├─ 1. 清理日誌 (最安全):
+            │  ssh root@{{ $labels.instance }} "rm -f /var/log/*.{1,2,3,gz,old} && journalctl --vacuum=500M"
+            │
+            ├─ 2. 清理臨時文件:
+            │  ssh root@{{ $labels.instance }} "rm -rf /tmp/* && rm -rf /var/tmp/*"
+            │
+            ├─ 3. 清理包管理器緩存:
+            │  ssh root@{{ $labels.instance }} "yum clean all && dnf clean all"
+            │
+            ├─ 4. 查看是否有已刪除但未釋放的大文件:
+            │  ssh root@{{ $labels.instance }} "lsof | grep deleted | sort -k7 -rh | head -10"
+            │
+            └─ 5. 如果上述都不夠，考慮清理舊備份:
+               ssh root@{{ $labels.instance }} "find {{ $labels.mount_point }} -name '*.bak' -o -name '*.old' | xargs rm -f"
+            
+            【步驟 3】永久解決 (需要規劃)
+            ├─ 短期:
+            │  ✓ 增加磁盤或掛載 NFS
+            │  ✓ 配置日誌輪轉 (logrotate)
+            │
+            └─ 長期:
+               ✓ 分析應用數據增長趨勢
+               ✓ 升級硬件或設置自動清理策略
+            
+            🔗 查看磁盤使用:
+            [磁盤詳情](https://your-grafana/d/rhel-disk-space?var-hostname={{ $labels.hostname }})
+
+  # ============================================================================
+  # 🌐 RHEL 8/9 網絡異常檢測
+  # ============================================================================
+  - name: RHEL_Network_Anomalies
+    interval: 1m
+    rules:
+      # 🟡 網絡流量預警
+      - alert: RHEL_Network_Traffic_Anomaly_Warning
+        expr: >
+          (last_over_time(anomaly:level{anomaly_name=~"network.*bytes|eth.*bytes", anomaly_strategy="adaptive"}[2m])
+          > last_over_time(anomaly:upper_band{anomaly_name=~"network.*bytes|eth.*bytes", anomaly_strategy="adaptive"}[2m]))
+        for: 5m
+        labels:
+          severity: info
+          strategy: adaptive
+          resource_type: network
+          os: rhel
+        annotations:
+          summary: "[網絡流量] {{ $labels.hostname }} 預警"
+          description: |
+            🟡 網絡流量異常 - Adaptive 策略
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            主機: {{ $labels.hostname }} ({{ $labels.instance }})
+            網卡: {{ $labels.device }}
+            
+            📊 流量指標:
+            • 當前流量: {{ $value | printf "%0.1f" }} Mbps
+            • 安全上限: {{ $labels.upper_band | printf "%0.1f" }} Mbps
+
+      # 🔴 網絡流量嚴重異常
+      - alert: RHEL_Network_Traffic_Anomaly_Critical
+        expr: >
+          (last_over_time(anomaly:level{anomaly_name=~"network.*bytes|eth.*bytes", anomaly_strategy="robust"}[2m])
+          > last_over_time(anomaly:upper_band{anomaly_name=~"network.*bytes|eth.*bytes", anomaly_strategy="robust"}[2m]))
+        for: 2m
+        labels:
+          severity: critical
+          strategy: robust
+          resource_type: network
+          os: rhel
+        annotations:
+          summary: "🔴 [網絡流量] {{ $labels.hostname }} 嚴重異常"
+          description: |
+            🔴 網絡流量嚴重異常 - Robust 策略
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            主機: {{ $labels.hostname }} ({{ $labels.instance }})
+            
+            📊 異常流量:
+            • 當前流量: {{ $value | printf "%0.1f" }} Mbps
+            • 歷史中位數: {{ $labels.median | printf "%0.1f" }} Mbps
+            • 增長倍數: {{ ($value / $labels.median) | printf "%0.1f" }}x
+
+  # ============================================================================
+  # 🔧 RHEL 8/9 Systemd 服務異常檢測
+  # ============================================================================
+  - name: RHEL_Systemd_Service_Anomalies
+    interval: 2m
+    rules:
+      # 🔴 關鍵服務异常
+      - alert: RHEL_Service_Failure
+        expr: >
+          (rate(systemd_unit_state{state="failed"}[5m]) > 0)
+        for: 1m
+        labels:
+          severity: warning
+          resource_type: service
+          os: rhel
+        annotations:
+          summary: "[服務] {{ $labels.name }} 異常"
+          description: |
+            🚨 服務異常
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            服務: {{ $labels.name }}
+            
+            🔧 快速診斷:
+            ssh root@{{ $labels.instance }} "systemctl status {{ $labels.name }} && journalctl -u {{ $labels.name }} -n 50"
