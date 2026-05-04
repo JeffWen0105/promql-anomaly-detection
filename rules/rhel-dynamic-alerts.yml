@@ -1,0 +1,41 @@
+# RHEL 8/9 AI Dynamic Anomaly Detection Alerting Rules
+
+## Overview
+These alerting rules are designed for RHEL 8/9 systems, focusing on anomalies in key system metrics using AI techniques for detection. The rules monitor CPU, memory, disk, network, systemd services, and SELinux to ensure system integrity and performance.
+
+## CPU Monitoring
+- **Alert:** High CPU Utilization
+  - **Summary:** Detects when CPU usage exceeds 85%.
+  - **Description:** This rule alerts when CPU utilization surpasses 85% for more than 5 minutes, indicating potential overload or misbehaving processes.
+
+## Memory Monitoring
+- **Alert:** High Memory Usage
+  - **Summary:** Detects when memory usage exceeds 90%.
+  - **Description:** Triggers an alert when the memory usage exceeds 90% for more than 10 minutes, suggesting a possible memory leak or insufficient resources.
+
+## Disk Monitoring
+- **Alert:** Disk Space Alert
+  - **Summary:** Detects if disk usage exceeds 90%.
+  - **Description:** Alerts when disk space usage exceeds 90% on any filesystem, indicating a potential risk of running out of space.
+
+## Network Monitoring
+- **Alert:** Unusual Network Traffic
+  - **Summary:** Detects sudden spikes in network traffic.
+  - **Description:** This rule monitors network throughput and alerts if it exceeds defined thresholds, which may indicate a DDoS attack or unauthorized access attempts.
+
+## Systemd Services Monitoring
+- **Alert:** Critical Service Down
+  - **Summary:** Alerts when a critical systemd service is inactive.
+  - **Description:** This rule monitors critical services and triggers an alert if any configured service fails to start or stops unexpectedly.
+
+## SELinux Monitoring
+- **Alert:** SELinux Policy Violations
+  - **Summary:** Detects any SELinux denials.
+  - **Description:** This alert monitors SELinux logs for denials; if a denial occurs, it indicates a potential security breach or misconfiguration of applications.
+
+## Alert Configuration
+- Customize thresholds and durations based on your environment.
+- Integrate with your AI monitoring system for analysis and anomaly detection.
+
+# Additional Notes
+Ensure to routinely review and update these rules to adapt to changing system dynamics and requirements.
